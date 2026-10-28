@@ -3,7 +3,8 @@ import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { formatCnpj, isValidCnpj, normalizeCnpj } from './lib/cnpj'
 import type { CompanyRole } from './lib/database.types'
-import { isSupabaseConfigured, supabase } from './lib/supabase'
+import { DEMO_COMPANY, DEMO_COMPANY_ID, DEMO_USER_ID, resetDemoData } from './lib/demo'
+import { isSupabaseConfigured, setDemoSupabaseMode, supabase } from './lib/supabase'
 
 const Customers = lazy(() => import('./Customers'))
 const Sales = lazy(() => import('./Sales'))
@@ -24,7 +25,7 @@ type Company = {
   id: string
   legal_name: string
   trade_name: string | null
-  cnpj: string
+  cnpj: string | null
 }
 type CompanyMembership = {
   company_id: string
@@ -49,6 +50,11 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login')
+  const [entryScreen, setEntryScreen] = useState<'welcome' | 'auth'>('welcome')
+  const [demoMode, setDemoMode] = useState(false)
+  const [demoVersion, setDemoVersion] = useState(0)
+  const [demoError, setDemoError] = useState('')
+  const [pendingCompany, setPendingCompany] = useState<{ legalName: string; tradeName: string; cnpj: string } | null>(null)
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -74,6 +80,7 @@ function App() {
       if (!active) return
       receivedAuthEvent = true
       setSession(nextSession)
+      setMembershipsLoading(Boolean(nextSession))
       setAuthError('')
       setAuthMessage('')
       setAuthLoading(false)
@@ -83,6 +90,7 @@ function App() {
       if (!active || receivedAuthEvent) return
       if (error) setAuthError(error.message)
       setSession(data.session)
+      setMembershipsLoading(Boolean(data.session))
       setAuthLoading(false)
     })
 
@@ -175,12 +183,25 @@ function App() {
 
     try {
       if (authMode === 'signup') {
+        const formData = new FormData(event.currentTarget)
+        const legalName = String(formData.get('legalName') ?? '').trim()
+        const tradeName = String(formData.get('tradeName') ?? '').trim()
+        const cnpj = normalizeCnpj(String(formData.get('cnpj') ?? ''))
+
         if (fullName.trim().length < 2) {
           setAuthError('Informe seu nome completo.')
           return
         }
         if (password.length < 8) {
           setAuthError('A senha deve ter pelo menos 8 caracteres.')
+          return
+        }
+        if (legalName.length < 2) {
+          setAuthError('Informe a razão social da empresa.')
+          return
+        }
+        if (cnpj && !isValidCnpj(cnpj)) {
+          setAuthError('O CNPJ informado é inválido. Confira os 14 dígitos.')
           return
         }
 
@@ -191,11 +212,14 @@ function App() {
         })
 
         if (error) throw error
+        const companyDraft = { legalName, tradeName, cnpj }
         if (data.session) {
           setSession(data.session)
-          setAuthMessage('Conta criada. Agora cadastre sua empresa para começar.')
+          setMembershipsLoading(true)
+          await createCompany(companyDraft)
         } else {
-          setAuthMessage('Conta criada. Confirme seu e-mail e entre para continuar.')
+          setPendingCompany(companyDraft)
+          setAuthMessage('Conta criada. Confirme seu e-mail e entre; sua empresa será cadastrada automaticamente em seguida.')
           setAuthMode('login')
         }
       } else {
@@ -206,12 +230,41 @@ function App() {
 
         if (error) throw error
         setSession(data.session)
+        setMembershipsLoading(Boolean(data.session))
+        if (pendingCompany) {
+          await createCompany(pendingCompany)
+          setPendingCompany(null)
+        }
       }
     } catch (error) {
       setAuthError(errorMessage(error))
     } finally {
       setAuthBusy(false)
     }
+  }
+
+  async function createCompany(company: { legalName: string; tradeName: string; cnpj: string }): Promise<void> {
+    if (!supabase) return
+
+    setCompanyError('')
+    setCompanyMessage('')
+    const { data, error } = await supabase.rpc('create_company', {
+      p_legal_name: company.legalName,
+      p_trade_name: company.tradeName || null,
+      p_cnpj: company.cnpj || null,
+    })
+
+    if (error) {
+      if (error.code === '23505') throw new Error('Já existe uma empresa cadastrada com este CNPJ.')
+      if (error.message.includes('invalid_cnpj')) throw new Error('O CNPJ informado é inválido.')
+      if (error.message.includes('invalid_legal_name')) throw new Error('A razão social precisa ter entre 2 e 180 caracteres.')
+      throw error
+    }
+    if (!data) throw new Error('O banco não retornou o identificador da empresa criada.')
+
+    setSelectedCompanyId(data)
+    setCompanyMessage('Empresa cadastrada. Seu usuário recebeu o papel de proprietário.')
+    setMembershipReload((value) => value + 1)
   }
 
   async function submitCompany(event: FormEvent<HTMLFormElement>) {
@@ -230,36 +283,14 @@ function App() {
       setCompanyError('Informe a razão social da empresa.')
       return
     }
-    if (!isValidCnpj(cnpj)) {
+    if (cnpj && !isValidCnpj(cnpj)) {
       setCompanyError('O CNPJ informado é inválido. Confira os 14 dígitos.')
       return
     }
 
     setCompanyBusy(true)
     try {
-      const { data, error } = await supabase.rpc('create_company', {
-        p_legal_name: legalName,
-        p_trade_name: tradeName || null,
-        p_cnpj: cnpj,
-      })
-
-      if (error) {
-        if (error.code === '23505') {
-          throw new Error('Já existe uma empresa cadastrada com este CNPJ.')
-        }
-        if (error.message.includes('invalid_cnpj')) {
-          throw new Error('O CNPJ informado é inválido.')
-        }
-        if (error.message.includes('invalid_legal_name')) {
-          throw new Error('A razão social precisa ter entre 2 e 180 caracteres.')
-        }
-        throw error
-      }
-      if (!data) throw new Error('O banco não retornou o identificador da empresa criada.')
-
-      setSelectedCompanyId(data)
-      setCompanyMessage('Empresa cadastrada. Seu usuário recebeu o papel de proprietário.')
-      setMembershipReload((value) => value + 1)
+      await createCompany({ legalName, tradeName, cnpj })
     } catch (error) {
       setCompanyError(`Não foi possível cadastrar a empresa: ${errorMessage(error)}`)
     } finally {
@@ -274,59 +305,90 @@ function App() {
     if (error) setAuthError(`Não foi possível encerrar a sessão: ${error.message}`)
   }
 
-  if (!isSupabaseConfigured) {
+  function enterDemo() {
+    setDemoSupabaseMode(true)
+    setDemoMode(true)
+    setActiveModule('inicio')
+    setDemoError('')
+  }
+
+  function leaveDemo() {
+    setDemoSupabaseMode(false)
+    setDemoMode(false)
+    setDemoError('')
+    setEntryScreen('welcome')
+    setActiveModule('inicio')
+  }
+
+  function restartDemo() {
+    try {
+      resetDemoData()
+      setDemoVersion((version) => version + 1)
+      setDemoError('')
+    } catch (error) {
+      setDemoError(`Não foi possível reiniciar a demo: ${errorMessage(error)}`)
+    }
+  }
+
+  if (!demoMode && authLoading) {
+    return <div className="setup-page"><p role="status">Verificando sessão…</p></div>
+  }
+
+  // An existing Supabase session skips onboarding; unauthenticated visitors start at the welcome screen.
+  if (!demoMode && !session && entryScreen === 'welcome') {
     return (
-      <div className="setup-page">
-        <section className="setup-card">
-          <span className="brand-mark">MS</span>
-          <p className="eyebrow">CONFIGURAÇÃO NECESSÁRIA</p>
-          <h1>Conecte um projeto Supabase</h1>
-          <p>
-            Crie um arquivo <code>.env</code> baseado em <code>.env.example</code>
-            {' '}e preencha a URL e a chave pública do seu projeto. Nunca coloque
-            a chave <code>service_role</code> no front-end.
-          </p>
+      <div className="setup-page welcome-page">
+        <section className="welcome-entry-card">
+          <a className="brand entry-brand" href="/" aria-label="Nexora CRM">
+            <span className="brand-mark">NX</span>
+            <span><strong>NEXORA CRM</strong><small>Gestão inteligente para sua loja</small></span>
+          </a>
+          <span className="eyebrow">GESTÃO SIMPLES, LOJA EM MOVIMENTO</span>
+          <h1>Bem-vindo ao Nexora</h1>
+          <p>Organize vendas, estoque e relacionamento com clientes em um só lugar.</p>
+          <div className="entry-actions">
+            <button
+              className="primary-button"
+              onClick={() => { setAuthMode('signup'); setEntryScreen('auth'); setAuthError(''); setAuthMessage('') }}
+              type="button"
+            >
+              Cadastrar a empresa
+            </button>
+            <button className="secondary-button" onClick={enterDemo} type="button">Ver demo</button>
+          </div>
+          {!isSupabaseConfigured && (
+            <p className="form-alert error" role="status">
+              O cadastro real ficará disponível depois de configurar o Supabase. A demonstração já pode ser explorada.
+            </p>
+          )}
+          <button
+            className="text-button entry-login"
+            onClick={() => { setAuthMode('login'); setEntryScreen('auth'); setAuthError(''); setAuthMessage('') }}
+            type="button"
+          >
+            Já tem conta? Entrar
+          </button>
         </section>
       </div>
     )
   }
 
-  if (authLoading) {
-    return <div className="setup-page"><p role="status">Verificando sessão…</p></div>
-  }
-
-  if (!session) {
+  if (!demoMode && !session) {
     return (
       <div className="setup-page">
         <section className="auth-card">
+          <button className="back-link" onClick={() => { setEntryScreen('welcome'); setAuthError(''); setAuthMessage('') }} type="button">
+            ← Voltar ao início
+          </button>
           <a className="brand auth-brand" href="/">
             <span className="brand-mark">NX</span>
             <span><strong>NEXORA CRM</strong><small>Gestão</small></span>
           </a>
-          <span className="eyebrow">ACESSO SEGURO</span>
-          <h1>{authMode === 'login' ? 'Entre na sua conta' : 'Crie sua conta'}</h1>
-          <p className="form-intro">Acesse suas empresas e dados com segurança.</p>
-
-          <div className="auth-tabs" role="tablist" aria-label="Tipo de acesso">
-            <button
-              aria-selected={authMode === 'login'}
-              className={authMode === 'login' ? 'selected' : ''}
-              onClick={() => { setAuthMode('login'); setAuthError(''); setAuthMessage('') }}
-              role="tab"
-              type="button"
-            >
-              Entrar
-            </button>
-            <button
-              aria-selected={authMode === 'signup'}
-              className={authMode === 'signup' ? 'selected' : ''}
-              onClick={() => { setAuthMode('signup'); setAuthError(''); setAuthMessage('') }}
-              role="tab"
-              type="button"
-            >
-              Criar conta
-            </button>
-          </div>
+          <span className="eyebrow">{authMode === 'login' ? 'ACESSO SEGURO' : 'PRIMEIRO ACESSO'}</span>
+          <h1>{authMode === 'login' ? 'Entre na sua conta' : 'Cadastre sua empresa'}</h1>
+          <p className="form-intro">
+            {authMode === 'login' ? 'Acesse suas empresas e dados com segurança.' : 'Crie seu acesso e informe os dados básicos da empresa.'}
+          </p>
 
           <form className="form-stack" onSubmit={submitAuth}>
             {authMode === 'signup' && (
@@ -334,6 +396,19 @@ function App() {
                 Nome completo
                 <input autoComplete="name" maxLength={120} minLength={2} onChange={(event) => setFullName(event.target.value)} required value={fullName} />
               </label>
+            )}
+            {authMode === 'signup' && (
+              <>
+                <label>
+                  Razão social da empresa
+                  <input autoComplete="organization" maxLength={180} minLength={2} name="legalName" required />
+                </label>
+                <label>
+                  Nome fantasia <span className="optional">(opcional)</span>
+                  <input maxLength={180} name="tradeName" />
+                </label>
+                <CnpjField />
+              </>
             )}
             <label>
               E-mail
@@ -345,23 +420,31 @@ function App() {
             </label>
             {authError && <p className="form-alert error" role="alert">{authError}</p>}
             {authMessage && <p className="form-alert success" role="status">{authMessage}</p>}
-            <button className="primary-button" disabled={authBusy} type="submit">
-              {authBusy ? 'Aguarde…' : authMode === 'login' ? 'Entrar' : 'Criar conta'}
+            {!isSupabaseConfigured && <p className="form-alert error" role="alert">Configure o Supabase para cadastrar ou acessar uma empresa real.</p>}
+            <button className="primary-button" disabled={authBusy || !isSupabaseConfigured} type="submit">
+              {authBusy ? 'Aguarde…' : authMode === 'login' ? 'Entrar' : 'Criar conta e acessar'}
             </button>
           </form>
-          <p className="privacy-note">A autenticação é gerenciada pelo Supabase Auth.</p>
+          <p className="privacy-note">
+            {authMode === 'login' ? (
+              <>Ainda não tem conta? <button className="inline-link" onClick={() => { setAuthMode('signup'); setAuthError(''); setAuthMessage('') }} type="button">Cadastrar a empresa</button></>
+            ) : 'A autenticação é gerenciada pelo Supabase Auth.'}
+          </p>
         </section>
       </div>
     )
   }
 
-  const selectedMembership = memberships.find((item) => item.company_id === selectedCompanyId)
+  const demoMembership: CompanyMembership = { company_id: DEMO_COMPANY_ID, role: 'owner', company: DEMO_COMPANY }
+  const selectedMembership = demoMode
+    ? demoMembership
+    : memberships.find((item) => item.company_id === selectedCompanyId)
 
-  if (membershipsLoading) {
+  if (!demoMode && membershipsLoading) {
     return <div className="setup-page"><p role="status">Carregando empresas…</p></div>
   }
 
-  if (membershipLoadError) {
+  if (!demoMode && membershipLoadError) {
     return (
       <div className="setup-page">
         <section className="auth-card">
@@ -377,7 +460,7 @@ function App() {
     )
   }
 
-  if (!memberships.length) {
+  if (!demoMode && !memberships.length) {
     return (
       <div className="setup-page">
         <section className="auth-card company-card">
@@ -407,9 +490,22 @@ function App() {
   }
 
   const activeModuleInfo = modules.find((item) => item.id === activeModule)
+  const currentUserId = demoMode ? DEMO_USER_ID : session?.user.id ?? ''
+  const currentUserName = demoMode ? 'Operador da Demo' : String(session?.user.user_metadata.full_name ?? '')
+  const visibleMemberships = demoMode ? [demoMembership] : memberships
 
   return (
-    <div className="app-shell">
+    <>
+    {demoMode && (
+      <div className="demo-banner" role="region" aria-label="Modo demonstração">
+        <p><strong>Modo demonstração</strong> — os dados são fictícios e ficam isolados neste navegador.</p>
+        <div>
+          <button className="demo-banner-button" onClick={restartDemo} type="button">Reiniciar demo</button>
+          <button className="demo-banner-button" onClick={leaveDemo} type="button">Sair da demo / Cadastrar minha empresa</button>
+        </div>
+      </div>
+    )}
+    <div className={`app-shell${demoMode ? ' demo-mode' : ''}`}>
       <aside className="sidebar">
         <a className="brand" href="#" onClick={() => setActiveModule('inicio')}>
           <span className="brand-mark">NX</span>
@@ -435,7 +531,7 @@ function App() {
 
         <div className="sidebar-footer">
           <span className="status-dot" />
-          Sessão autenticada
+          {demoMode ? 'Dados locais da demo' : 'Sessão autenticada'}
         </div>
       </aside>
 
@@ -448,42 +544,45 @@ function App() {
           <div className="account-controls">
             <label className="company-switcher">
               <span>Empresa</span>
-              <select aria-label="Empresa ativa" onChange={(event) => setSelectedCompanyId(event.target.value)} value={selectedCompanyId}>
-                {memberships.map((membership) => (
+              <select aria-label="Empresa ativa" onChange={(event) => setSelectedCompanyId(event.target.value)} value={demoMode ? DEMO_COMPANY_ID : selectedCompanyId}>
+                {visibleMemberships.map((membership) => (
                   <option key={membership.company_id} value={membership.company_id}>
                     {membership.company.trade_name || membership.company.legal_name}
                   </option>
                 ))}
               </select>
             </label>
-            <button className="text-button" onClick={() => void signOut()} type="button">Sair</button>
+            {demoMode
+              ? <button className="text-button" onClick={leaveDemo} type="button">Sair da demo</button>
+              : <button className="text-button" onClick={() => void signOut()} type="button">Sair</button>}
           </div>
         </header>
 
+        {demoError && <p className="form-alert error page-alert" role="alert">{demoError}</p>}
         {companyError && <p className="form-alert error page-alert" role="alert">{companyError}</p>}
         {(activeModule === 'vendas' || activeModule === 'caixa') && selectedMembership ? (
           <Suspense fallback={<p role="status">Carregando Vendas/PDV…</p>}>
             <Sales
               companyId={selectedMembership.company_id}
               initialTab={activeModule === 'caixa' ? 'cash' : 'pos'}
-              key={`sales-${activeModule}-${selectedMembership.company_id}`}
+              key={`sales-${activeModule}-${selectedMembership.company_id}-${demoVersion}`}
               role={selectedMembership.role}
-              userId={session.user.id}
-              userName={String(session.user.user_metadata.full_name ?? '')}
+              userId={currentUserId}
+              userName={currentUserName}
             />
           </Suspense>
         ) : activeModule === 'estoque' && selectedMembership ? (
           <Suspense fallback={<p role="status">Carregando estoque…</p>}>
-            <Inventory companyId={selectedMembership.company_id} role={selectedMembership.role} userId={session.user.id} />
+            <Inventory key={`inventory-${selectedMembership.company_id}-${demoVersion}`} companyId={selectedMembership.company_id} role={selectedMembership.role} userId={currentUserId} />
           </Suspense>
         ) : activeModule === 'clientes' && selectedMembership ? (
           <Suspense fallback={<p role="status">Carregando CRM…</p>}>
             <Customers
               companyId={selectedMembership.company_id}
               companyName={selectedMembership.company.trade_name || selectedMembership.company.legal_name}
-              key={`customers-${selectedMembership.company_id}`}
+              key={`customers-${selectedMembership.company_id}-${demoVersion}`}
               role={selectedMembership.role}
-              userId={session.user.id}
+              userId={currentUserId}
             />
           </Suspense>
         ) : (
@@ -493,9 +592,12 @@ function App() {
                 <span className="welcome-kicker">{selectedMembership ? roleLabels[selectedMembership.role] : 'EMPRESA'}</span>
                 <h2>{selectedMembership?.company.trade_name || selectedMembership?.company.legal_name}</h2>
                 <p>
-                  CNPJ {selectedMembership ? formatCnpj(selectedMembership.company.cnpj) : ''}
-                  {' · '}Os dados dos módulos ainda não foram conectados. Cada registro futuro será
-                  associado à empresa ativa e protegido por políticas RLS.
+                  {selectedMembership?.company.cnpj
+                    ? `CNPJ ${formatCnpj(selectedMembership.company.cnpj)}`
+                    : 'CNPJ não informado'}
+                  {demoMode
+                    ? ' · Explore os módulos operacionais com dados fictícios.'
+                    : ' · Seus dados são associados à empresa ativa e protegidos por políticas RLS.'}
                 </p>
               </div>
               <div className="welcome-symbol" aria-hidden="true">MS</div>
@@ -508,13 +610,15 @@ function App() {
               <span className="step-count">Fundação multiempresa</span>
             </section>
             <p className="notice">
-              Login e associação à empresa usam Supabase Auth. A autorização de acesso
-              aos dados é aplicada no banco; esta tela não substitui as políticas RLS.
+              {demoMode
+                ? 'Vendas/PDV, caixa, estoque e CRM estão preenchidos com dados de demonstração. Resultado e Configurações seguem em migração.'
+                : 'Login e associação à empresa usam Supabase Auth. A autorização de acesso aos dados é aplicada no banco; esta tela não substitui as políticas RLS.'}
             </p>
           </>
         )}
       </main>
     </div>
+    </>
   )
 }
 
@@ -523,7 +627,7 @@ function CnpjField() {
 
   return (
     <label>
-      CNPJ
+      CNPJ <span className="optional">(opcional)</span>
       <input
         autoComplete="off"
         inputMode="numeric"
@@ -531,7 +635,6 @@ function CnpjField() {
         name="cnpj"
         onChange={(event) => setCnpj(formatCnpj(event.target.value))}
         placeholder="00.000.000/0000-00"
-        required
         value={cnpj}
       />
       <span className="field-hint">Validado pelos dígitos verificadores; sem consulta externa.</span>

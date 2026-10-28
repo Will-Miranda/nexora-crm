@@ -28,7 +28,7 @@ export type Database = {
           id: string
           legal_name: string
           trade_name: string | null
-          cnpj: string
+          cnpj: string | null
           created_by: string
           created_at: string
           updated_at: string
@@ -37,7 +37,7 @@ export type Database = {
           id?: string
           legal_name: string
           trade_name?: string | null
-          cnpj: string
+          cnpj?: string | null
           created_by: string
           created_at?: string
           updated_at?: string
@@ -46,7 +46,7 @@ export type Database = {
           id?: string
           legal_name?: string
           trade_name?: string | null
-          cnpj?: string
+          cnpj?: string | null
           created_by?: string
           created_at?: string
           updated_at?: string
@@ -648,7 +648,7 @@ export type Database = {
         Args: {
           p_legal_name: string
           p_trade_name: string | null
-          p_cnpj: string
+          p_cnpj: string | null
         }
         Returns: string
       }
